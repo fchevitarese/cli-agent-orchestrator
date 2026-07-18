@@ -84,5 +84,22 @@ reconciliação no startup.
 Impacto: ruído/error storm, trabalho em executor, possível atraso de outros
 terminais e estado inconsistente. Relação com FD: possível apenas indiretamente
 se teardown incompleto deixar reader/subprocesso; medições atuais não mostraram
-leak. Status: corrida secundária confirmada; encerramento primário do Claude
-pendente.
+leak.
+
+## Mitigação implementada
+
+A primeira entrega do Lifecycle Supervisor adiciona uma geração em memória por
+runtime e um tombstone limitado aos 4.096 terminais encerrados mais recentes.
+`create_terminal()` registra a geração antes de ligar o FIFO. `clear_terminal()`
+incrementa a geração e instala o tombstone antes de cancelar timers ou remover
+estado; chunks enfileirados, lookup de provider em voo, timers de quiescência e
+resultados assíncronos de uma geração anterior passam a ser descartados.
+
+Testes determinísticos cobrem evento após cleanup, teardown concorrente com
+`get_provider`, reuso de ID e limite conjunto de tombstones/gerações. A
+mitigação elimina a corrida secundária reproduzida (`Terminal ... not found in
+database`) sem ocultar falhas reais de lookup para terminais ativos.
+
+Status: corrida secundária mitigada e coberta por regressão. A state machine
+persistida, envelope geracional no EventBus, drenagem estruturada e a causa
+primária do encerramento do Claude permanecem pendentes.
