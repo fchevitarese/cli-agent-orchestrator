@@ -266,6 +266,14 @@ def extract_scopes_from_token(token: str) -> List[str]:
     if not uri:  # pragma: no cover - guarded by is_auth_enabled
         return list(FULL_SCOPE_SET)
 
+    # Parse the complete JWT before any JWKS network I/O.  This verifies only
+    # the compact-serialization shape and JSON encoding; the token is not
+    # trusted here.  Signature, algorithm, issuer, audience, and expiry are
+    # still validated below with the configured JWKS key.  Parsing only the
+    # header would let a token with a valid header but malformed payload reach
+    # the IdP lookup even though it can never be verified.
+    jwt.decode_complete(token, options={"verify_signature": False})
+
     client = _jwks_cache.get_client(uri)
     try:
         signing_key = client.get_signing_key_from_jwt(token)
