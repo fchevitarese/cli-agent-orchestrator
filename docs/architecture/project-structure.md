@@ -42,4 +42,3 @@ Riscos de mudança: `api/main.py` e `memory_service.py` são grandes; constantes
 são avaliadas no import; serviços e provider manager são singletons; muitos
 adaptadores dependem de marcadores visuais externos. Prefira novas interfaces e
 testes de contrato em vez de refatoração transversal inicial.
-

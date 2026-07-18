@@ -32,4 +32,3 @@ testes.
 
 Para repetir com segurança, use `scripts/bootstrap-dev.sh`. Ele não executa
 `sudo`, não apaga ambientes e informa dependências ausentes.
-

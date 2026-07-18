@@ -33,4 +33,3 @@ instalação/profile mapping, documentação e testes de comandos/status/TUI. O
 melhor desenho futuro é substituir o `if/elif` por registry de descriptors com
 capabilities explícitas (headless, resume, hard permissions, MCP, structured
 output), evitando inferência por nome.
-

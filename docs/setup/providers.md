@@ -25,4 +25,3 @@ bootstrap.
 Formas de autenticação preservadas: Claude e Codex reutilizam assinaturas dos
 CLIs; OpenCode reutiliza seu armazenamento/configuração de providers; Cursor
 reutiliza o login do Agent CLI. CAO não deve copiar esses dados para o projeto.
-

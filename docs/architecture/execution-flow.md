@@ -39,4 +39,3 @@ terminal.
 Falhas importantes: API e DB não formam transação com tmux; eventos podem
 chegar depois de rollback; extração/status dependem do viewport; IDs lógicos e
 recursos físicos ainda não têm geração/tombstone comum.
-

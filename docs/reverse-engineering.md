@@ -117,4 +117,3 @@ Implementar um **Resource/Lifecycle Supervisor** com runtime generation,
 tombstone, cancelamento/drenagem de eventos e reconciliação DB↔backend. Em
 paralelo, instrumentar exit status do pane/CLI para fechar a causa do Claude.
 Sem lifecycle determinístico, planner e contexto apenas amplificariam corridas.
-

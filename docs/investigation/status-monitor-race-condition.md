@@ -86,4 +86,3 @@ terminais e estado inconsistente. Relação com FD: possível apenas indiretamen
 se teardown incompleto deixar reader/subprocesso; medições atuais não mostraram
 leak. Status: corrida secundária confirmada; encerramento primário do Claude
 pendente.
-

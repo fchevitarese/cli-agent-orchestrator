@@ -29,4 +29,3 @@ O banco é fixo sob o CAO home; tmux é backend padrão. `cao config list` mostr
 valores resolvidos e `cao config path` mostra o JSON. Nunca inclua valores do
 `.env` em relatórios. O `.env.example` da raiz contém apenas exemplos vazios e
 seguros; ele não substitui o `.env` gerenciado no home.
-

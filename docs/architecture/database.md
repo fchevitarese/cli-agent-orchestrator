@@ -44,4 +44,3 @@ ser reconstruído do registro, mas um processo inexistente continuará inválido
 Backups devem incluir arquivo principal e, se presentes, `-wal`/`-shm` com o
 servidor parado. Não existe reset transacional exposto; use home isolado em
 testes ou backup + recriação deliberada.
-

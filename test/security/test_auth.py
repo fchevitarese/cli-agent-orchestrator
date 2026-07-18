@@ -130,6 +130,25 @@ def test_wrong_audience_raises(monkeypatch, rsa_key):
         auth.extract_scopes_from_token(token)
 
 
+def test_malformed_payload_rejected_before_jwks_lookup(monkeypatch):
+    """A valid JWT header must not let a malformed payload trigger IdP I/O."""
+    monkeypatch.setenv("CAO_AUTH_JWKS_URI", "https://idp.example/jwks")
+    jwks_lookup_called = False
+
+    def _unexpected_lookup(_uri: str):
+        nonlocal jwks_lookup_called
+        jwks_lookup_called = True
+        raise AssertionError("JWKS lookup must not run for a malformed JWT")
+
+    monkeypatch.setattr(auth.get_jwks_cache(), "get_client", _unexpected_lookup)
+    token = "eyJhbGciOiJSUzI1NiIsImtpZCI6InRlc3QifQ.not-base64.signature"
+
+    with pytest.raises(jwt.DecodeError):
+        auth.extract_scopes_from_token(token)
+
+    assert jwks_lookup_called is False
+
+
 # --- issuer pinning (M1) ---------------------------------------------------
 
 

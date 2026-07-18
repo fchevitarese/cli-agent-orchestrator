@@ -46,4 +46,3 @@ Solução definitiva sugerida: adicionar teste CI de soak que repita criação e
 teardown de servidor/FIFO/tmux sob `ulimit -n 256`, registrando FD por tipo com
 `lsof`; impor timeout e cleanup a todas as requisições de fixtures reais. Se
 reaparecer, capturar PID e duas fotografias `lsof -p` separadas no tempo.
-

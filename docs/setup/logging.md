@@ -26,4 +26,3 @@ rg -n 'TERMINAL_ID|StatusMonitor|fifo|provider' \
 
 Não publique logs sem revisão: prompts e saídas de agentes podem conter código
 ou dados sensíveis, embora tokens não sejam intencionalmente logados.
-

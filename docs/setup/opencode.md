@@ -42,4 +42,3 @@ Limitações observadas: conclusão visual pode permanecer temporariamente como
 `processing`; `GET output?mode=last` chegou a retornar 404 antes de o marcador
 estabilizar; instalação paralela de perfis pode disputar `opencode.json`; `--yolo`
 não amplia permissões do TUI em runtime.
-

@@ -64,4 +64,3 @@ deve ocorrer apenas com servidor e sessões encerrados.
   `tmux capture-pane`; o TUI alt-screen pode atrasar a detecção.
 - `Could not acquire lock` do uv em ambiente contido: use
   `UV_CACHE_DIR=/tmp/cao-uv-cache`.
-

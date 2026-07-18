@@ -37,4 +37,3 @@ tmux ls
 Reset conservador: encerre sessões, pare o servidor, mova (não apague) o banco
 para um nome `.backup`, então rode `uv run cao init`. Em testes automatizados,
 use um home temporário em vez de tocar dados reais.
-

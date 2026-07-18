@@ -38,4 +38,3 @@ else
 fi
 
 printf 'Open-file limit: %s\n' "$(ulimit -n)"
-

@@ -48,4 +48,3 @@ Pontos de extensão: `ProviderType` + `ProviderManager`, `BaseProvider`,
 `TerminalBackend`, entry points `cao.plugins`, profiles/skills e o motor de
 workflows. Acoplamentos principais: nome/janela tmux como identidade operacional,
 regex/TUI por provider e singletons globais de serviços.
-
