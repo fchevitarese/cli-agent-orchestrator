@@ -299,6 +299,20 @@ class TestExitTerminalEndpoint:
             assert response.status_code == 404
             assert "Provider not found" in response.json()["detail"]
 
+    def test_exit_terminal_during_teardown_maps_to_409(self, client):
+        """A graceful exit cannot race resource teardown."""
+        from cli_agent_orchestrator.services.terminal_service import TerminalInputBlockedError
+
+        with patch("cli_agent_orchestrator.api.main.terminal_service") as mock_svc:
+            mock_svc.exit_terminal_cli.side_effect = TerminalInputBlockedError(
+                "Terminal abcd1234 is stopping"
+            )
+
+            response = client.post("/terminals/abcd1234/exit")
+
+            assert response.status_code == 409
+            assert "stopping" in response.json()["detail"]
+
     def test_exit_terminal_server_error_maps_to_500(self, client):
         """An unexpected error maps to 500."""
         with patch("cli_agent_orchestrator.api.main.terminal_service") as mock_svc:

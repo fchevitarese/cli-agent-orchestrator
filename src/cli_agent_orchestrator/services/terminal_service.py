@@ -62,6 +62,10 @@ from cli_agent_orchestrator.services.session_env import (
     set_session_env,
 )
 from cli_agent_orchestrator.services.status_monitor import status_monitor
+from cli_agent_orchestrator.services.terminal_lifecycle import (
+    TerminalTeardownInProgressError,
+    terminal_lifecycle,
+)
 from cli_agent_orchestrator.utils.agent_profiles import load_agent_profile
 from cli_agent_orchestrator.utils.skills import build_skill_catalog
 from cli_agent_orchestrator.utils.terminal import (
@@ -81,10 +85,26 @@ _memory_injected_lock = threading.Lock()
 # deferred provider.initialize() + input-send task could be GC'd mid-run,
 # silently leaving a worker uninitialized. Tasks drop themselves on completion.
 _deferred_init_tasks: set = set()
+_deferred_init_tasks_by_terminal: dict[str, asyncio.Task] = {}
+_deferred_init_tasks_lock = threading.Lock()
+
+_TERMINAL_TEARDOWN_DRAIN_TIMEOUT_S = 5.0
+_TERMINAL_TEARDOWN_POLL_INTERVAL_S = 0.01
 
 
 class TerminalInputBlockedError(Exception):
     """Raised when orchestrated input would answer an active interactive prompt."""
+
+
+async def _wait_for_status_monitor_idle(terminal_id: str, timeout: float) -> bool:
+    """Cooperatively drain monitor work without blocking the server event loop."""
+    deadline = time.monotonic() + timeout
+    while not status_monitor.is_terminal_idle(terminal_id):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        await asyncio.sleep(min(_TERMINAL_TEARDOWN_POLL_INTERVAL_S, remaining))
+    return True
 
 
 def inject_memory_context(first_message: str, terminal_id: str) -> str:
@@ -193,6 +213,7 @@ async def create_terminal(
         ValueError: If session already exists (new_session=True) or not found (new_session=False)
         TimeoutError: If provider initialization times out
     """
+    terminal_id = ""
     session_created = False  # tracks whether THIS call created the tmux session
     # harness-control#186: tracks whether THIS call created a new WINDOW in an
     # already-existing session (the `new_session=False` branch below — what
@@ -310,6 +331,7 @@ async def create_terminal(
         # tombstone; registration starts a new generation and makes only this
         # runtime eligible for status detection.
         status_monitor.register_terminal(terminal_id)
+        terminal_lifecycle.register_terminal(terminal_id)
 
         # Step 4/5: Set up the FIFO event-driven output pipeline for pipe-pane
         # backends (tmux). Event-inbox backends (herdr) deliver via their own
@@ -381,7 +403,8 @@ async def create_terminal(
                 registry,
             )
         else:
-            await provider_instance.initialize()
+            with terminal_lifecycle.operation(terminal_id):
+                await provider_instance.initialize()
 
             # Persist shell_command baseline if the provider captured one
             shell_command = provider_instance.shell_baseline
@@ -438,12 +461,29 @@ async def create_terminal(
     except Exception as e:
         # Cleanup on failure: clean up FIFO reader, status monitor, provider, and session
         logger.error(f"Failed to create terminal: {e}")
+        owns_cleanup = False
+        if terminal_id:
+            owns_cleanup = terminal_lifecycle.start_teardown(terminal_id)
+            if not owns_cleanup:
+                terminal_lifecycle.wait_until_stopped(
+                    terminal_id,
+                    timeout=_TERMINAL_TEARDOWN_DRAIN_TIMEOUT_S,
+                )
+                raise
         try:
             fifo_manager.stop_reader(terminal_id)
         except Exception:
             pass  # Ignore cleanup errors
         try:
             status_monitor.clear_terminal(terminal_id)
+        except Exception:
+            pass  # Ignore cleanup errors
+        try:
+            await _wait_for_status_monitor_idle(terminal_id, _TERMINAL_TEARDOWN_DRAIN_TIMEOUT_S)
+        except asyncio.CancelledError:
+            if owns_cleanup:
+                terminal_lifecycle.finish_teardown(terminal_id)
+            raise
         except Exception:
             pass  # Ignore cleanup errors
         try:
@@ -468,7 +508,10 @@ async def create_terminal(
             # Session is gone, drop any forwarded env we stashed for it so
             # secrets don't linger in memory or bleed into a future reuse
             # of the same name.
-            clear_session_env(session_name)
+            try:
+                clear_session_env(session_name)
+            except Exception:
+                pass  # Ignore cleanup errors
         elif window_created and session_name and window_name:
             # harness-control#186: a window added to an ALREADY-EXISTING session
             # (new_session=False -- every MCP spawn/assign-into-existing-session
@@ -487,6 +530,8 @@ async def create_terminal(
                 get_backend().kill_window(session_name, window_name)
             except Exception:
                 pass  # Ignore cleanup errors
+        if owns_cleanup:
+            terminal_lifecycle.finish_teardown(terminal_id)
         raise
 
 
@@ -574,7 +619,8 @@ def _schedule_deferred_init(
     async def _run() -> None:
         caller_id: Optional[str] = None
         try:
-            await provider_instance.initialize()
+            with terminal_lifecycle.operation(terminal_id):
+                await provider_instance.initialize()
             shell_command = provider_instance.shell_baseline
             if isinstance(shell_command, str) and shell_command:
                 update_terminal_shell_command(terminal_id, shell_command)
@@ -598,6 +644,11 @@ def _schedule_deferred_init(
                     sender_id=caller_id,
                     orchestration_type=orchestration_type,
                 )
+        except TerminalTeardownInProgressError:
+            # Deletion won the race before deferred initialization acquired its
+            # runtime lease.  Teardown owns cleanup and this task must exit
+            # silently instead of recursively scheduling another delete.
+            logger.debug("Deferred init cancelled by teardown for %s", terminal_id)
         except TerminalInputBlockedError as e:
             # The worker initialized but is parked on an interactive prompt
             # (WAITING_USER_ANSWER). It is alive and can be driven via
@@ -646,7 +697,29 @@ def _schedule_deferred_init(
         return
     task = loop.create_task(_run())
     _deferred_init_tasks.add(task)
-    task.add_done_callback(_deferred_init_tasks.discard)
+    with _deferred_init_tasks_lock:
+        _deferred_init_tasks_by_terminal[terminal_id] = task
+
+    def _forget(completed: asyncio.Task) -> None:
+        _deferred_init_tasks.discard(completed)
+        with _deferred_init_tasks_lock:
+            if _deferred_init_tasks_by_terminal.get(terminal_id) is completed:
+                _deferred_init_tasks_by_terminal.pop(terminal_id, None)
+
+    task.add_done_callback(_forget)
+
+
+def _cancel_deferred_init(terminal_id: str) -> None:
+    """Request cancellation of a terminal's deferred initializer from any thread."""
+    with _deferred_init_tasks_lock:
+        task = _deferred_init_tasks_by_terminal.get(terminal_id)
+    if task is None or task.done():
+        return
+    try:
+        task.get_loop().call_soon_threadsafe(task.cancel)
+    except RuntimeError:
+        # The loop is already closed; the task can no longer touch resources.
+        pass
 
 
 def get_terminal(terminal_id: str) -> Dict:
@@ -704,6 +777,27 @@ def get_working_directory(terminal_id: str) -> Optional[str]:
 
 
 def send_input(
+    terminal_id: str,
+    message: str,
+    registry: PluginRegistry | None = None,
+    sender_id: str | None = None,
+    orchestration_type: OrchestrationType | None = None,
+) -> bool:
+    """Send input while holding a lease on the live terminal runtime."""
+    try:
+        with terminal_lifecycle.operation(terminal_id):
+            return _send_input_active(
+                terminal_id,
+                message,
+                registry=registry,
+                sender_id=sender_id,
+                orchestration_type=orchestration_type,
+            )
+    except TerminalTeardownInProgressError as exc:
+        raise TerminalInputBlockedError(str(exc)) from exc
+
+
+def _send_input_active(
     terminal_id: str,
     message: str,
     registry: PluginRegistry | None = None,
@@ -830,6 +924,15 @@ def send_input(
 
 
 def send_special_key(terminal_id: str, key: str) -> bool:
+    """Send a special key while holding a lease on the live runtime."""
+    try:
+        with terminal_lifecycle.operation(terminal_id):
+            return _send_special_key_active(terminal_id, key)
+    except TerminalTeardownInProgressError as exc:
+        raise TerminalInputBlockedError(str(exc)) from exc
+
+
+def _send_special_key_active(terminal_id: str, key: str) -> bool:
     """Send a tmux special key sequence (e.g., C-d, C-c) to terminal.
 
     Unlike send_input(), this sends the key as a tmux key name (not literal text)
@@ -1056,6 +1159,44 @@ def get_output(terminal_id: str, mode: OutputMode = OutputMode.FULL) -> str:
 
 
 def delete_terminal(terminal_id: str, registry: PluginRegistry | None = None) -> bool:
+    """Stop new work, drain in-flight work, then release terminal resources."""
+    owns_teardown = terminal_lifecycle.start_teardown(terminal_id)
+    if not owns_teardown:
+        terminal_lifecycle.wait_until_stopped(
+            terminal_id,
+            timeout=_TERMINAL_TEARDOWN_DRAIN_TIMEOUT_S,
+        )
+        return False
+
+    try:
+        # Fence the output pipeline before provider/DB teardown. Queued chunks
+        # become stale immediately; enrolled workers are drained below.
+        status_monitor.clear_terminal(terminal_id)
+        _cancel_deferred_init(terminal_id)
+
+        if not terminal_lifecycle.wait_for_idle(
+            terminal_id,
+            timeout=_TERMINAL_TEARDOWN_DRAIN_TIMEOUT_S,
+        ):
+            logger.warning(
+                "Timed out waiting for terminal operations to drain for %s",
+                terminal_id,
+            )
+        if not status_monitor.wait_for_terminal_idle(
+            terminal_id,
+            timeout=_TERMINAL_TEARDOWN_DRAIN_TIMEOUT_S,
+        ):
+            logger.warning(
+                "Timed out waiting for status detection to drain for %s",
+                terminal_id,
+            )
+
+        return _delete_terminal_resources(terminal_id, registry=registry)
+    finally:
+        terminal_lifecycle.finish_teardown(terminal_id)
+
+
+def _delete_terminal_resources(terminal_id: str, registry: PluginRegistry | None = None) -> bool:
     """Delete terminal and kill its tmux window."""
     try:
         # Unregister from herdr inbox service

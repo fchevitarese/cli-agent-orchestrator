@@ -884,6 +884,20 @@ class TestSendTerminalKey:
         assert response.status_code == 404
         assert "Terminal not found" in response.json()["detail"]
 
+    def test_send_key_during_teardown_returns_conflict(self, client):
+        """POST /terminals/{id}/key returns 409 once teardown fenced the runtime."""
+        from cli_agent_orchestrator.services.terminal_service import TerminalInputBlockedError
+
+        with patch("cli_agent_orchestrator.api.main.terminal_service") as mock_svc:
+            mock_svc.send_special_key.side_effect = TerminalInputBlockedError(
+                "Terminal abcd1234 is stopping"
+            )
+
+            response = client.post("/terminals/abcd1234/key", params={"key": "Enter"})
+
+        assert response.status_code == 409
+        assert "stopping" in response.json()["detail"]
+
     def test_send_key_server_error(self, client):
         """POST /terminals/{id}/key returns 500 on error."""
         with patch("cli_agent_orchestrator.api.main.terminal_service") as mock_svc:
