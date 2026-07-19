@@ -7,6 +7,7 @@ Publisher: terminal.{id}.status
 import asyncio
 import logging
 import threading
+import time
 from collections import OrderedDict
 from typing import Dict, List, Optional, Tuple
 
@@ -66,6 +67,7 @@ class StatusMonitor:
         # not interleave with notify_input_sent, or a freshly-armed gate can
         # be consumed by a decision taken against stale state.
         self._lock = threading.RLock()
+        self._idle_condition = threading.Condition(self._lock)
         self._buffers: Dict[str, str] = {}
         self._last_status: Dict[str, TerminalStatus] = {}
         # Per-terminal flag: when True, the next provider-detected PROCESSING
@@ -98,6 +100,7 @@ class StatusMonitor:
         # this a detection task can be garbage-collected mid-run and silently drop
         # a status transition. Tasks remove themselves on completion.
         self._detect_tasks: set = set()
+        self._inflight_work: Dict[str, int] = {}
         # A generation identifies one runtime incarnation of a terminal ID.
         # clear_terminal() advances it and installs a tombstone before resources
         # are removed; callbacks that captured an older generation then become
@@ -175,6 +178,16 @@ class StatusMonitor:
                 logger.debug("Ignoring output for stopped terminal %s", terminal_id)
                 return
             generation = self._generations.get(terminal_id, 0)
+
+            self._inflight_work[terminal_id] = self._inflight_work.get(terminal_id, 0) + 1
+
+        try:
+            self._process_chunk_for_generation(terminal_id, chunk, generation)
+        finally:
+            self._finish_inflight_work(terminal_id)
+
+    def _process_chunk_for_generation(self, terminal_id: str, chunk: str, generation: int) -> None:
+        """Process one chunk already enrolled in a runtime generation."""
 
         try:
             provider = provider_manager.get_provider(terminal_id)
@@ -404,7 +417,7 @@ class StatusMonitor:
                 generation=generation,
             )
         else:
-            self._spawn_tracked(loop, _detect_and_apply())
+            self._spawn_tracked(loop, terminal_id, generation, _detect_and_apply())
 
     def _schedule_raw_detection(
         self, terminal_id: str, buffer: str, generation: Optional[int] = None
@@ -531,14 +544,54 @@ class StatusMonitor:
                 generation=generation,
             )
         else:
-            self._spawn_tracked(loop, _detect_and_apply())
+            self._spawn_tracked(loop, terminal_id, generation, _detect_and_apply())
 
-    def _spawn_tracked(self, loop, coro) -> None:
+    def _spawn_tracked(self, loop, terminal_id: str, generation: Optional[int], coro) -> None:
         """Create a task on ``loop`` and hold a strong reference until it
         finishes, so asyncio's weak task references can't GC it mid-run."""
-        task = loop.create_task(coro)
+        with self._lock:
+            if not self._is_current_generation_locked(terminal_id, generation):
+                coro.close()
+                return
+            self._inflight_work[terminal_id] = self._inflight_work.get(terminal_id, 0) + 1
+        try:
+            task = loop.create_task(coro)
+        except Exception:
+            self._finish_inflight_work(terminal_id)
+            coro.close()
+            raise
         self._detect_tasks.add(task)
-        task.add_done_callback(self._detect_tasks.discard)
+
+        def _done(completed) -> None:
+            self._detect_tasks.discard(completed)
+            self._finish_inflight_work(terminal_id)
+
+        task.add_done_callback(_done)
+
+    def _finish_inflight_work(self, terminal_id: str) -> None:
+        with self._idle_condition:
+            remaining = self._inflight_work.get(terminal_id, 0) - 1
+            if remaining > 0:
+                self._inflight_work[terminal_id] = remaining
+            else:
+                self._inflight_work.pop(terminal_id, None)
+            self._idle_condition.notify_all()
+
+    def wait_for_terminal_idle(self, terminal_id: str, timeout: float) -> bool:
+        """Wait for enrolled chunk/detection work to leave the stopped runtime."""
+        deadline = time.monotonic() + timeout
+        with self._idle_condition:
+            while self._inflight_work.get(terminal_id, 0) > 0:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                self._idle_condition.wait(remaining)
+            return True
+
+    def is_terminal_idle(self, terminal_id: str) -> bool:
+        """Return immediately whether a terminal has no enrolled monitor work."""
+        with self._lock:
+            return self._inflight_work.get(terminal_id, 0) == 0
 
     @staticmethod
     def _running_loop() -> Optional[asyncio.AbstractEventLoop]:

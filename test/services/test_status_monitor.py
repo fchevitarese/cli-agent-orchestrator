@@ -152,6 +152,32 @@ class TestLifecycleGeneration:
         mock_bus.publish.assert_not_called()
         assert sm.get_buffer("t1") == ""
 
+    @patch("cli_agent_orchestrator.services.status_monitor.provider_manager")
+    def test_teardown_waits_for_enrolled_chunk_worker(self, mock_pm):
+        sm = StatusMonitor()
+        sm.register_terminal("t1")
+        lookup_started = threading.Event()
+        release_lookup = threading.Event()
+
+        def _blocking_lookup(_terminal_id):
+            lookup_started.set()
+            assert release_lookup.wait(timeout=1)
+            return MagicMock(supports_screen_detection=False)
+
+        mock_pm.get_provider.side_effect = _blocking_lookup
+        worker = threading.Thread(target=sm._process_chunk, args=("t1", "output"))
+        worker.start()
+        assert lookup_started.wait(timeout=1)
+
+        sm.clear_terminal("t1")
+        assert sm.wait_for_terminal_idle("t1", timeout=0.01) is False
+
+        release_lookup.set()
+        worker.join(timeout=1)
+
+        assert not worker.is_alive()
+        assert sm.wait_for_terminal_idle("t1", timeout=1) is True
+
     @patch("cli_agent_orchestrator.services.status_monitor.bus")
     def test_old_generation_result_ignored_after_terminal_id_reuse(self, mock_bus):
         sm = StatusMonitor()
